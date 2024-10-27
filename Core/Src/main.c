@@ -50,6 +50,8 @@ enum dsMenuSelected {U_DISP,I_DISP, U_SETP, I_SETP, EXIT, SAVE_EXIT};
 #define SCALE_U_SP_MAX 38.0
 #define SCALE_I_SP_MIN 205.0
 #define SCALE_I_SP_MAX 230.0
+#define I2C_SLAVE_ADDRESS 0x2D
+#define I2C_BUFF_LEN 16 //multiple of 4 number
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -60,6 +62,8 @@ enum dsMenuSelected {U_DISP,I_DISP, U_SETP, I_SETP, EXIT, SAVE_EXIT};
 /* Private variables ---------------------------------------------------------*/
 ADC_HandleTypeDef hadc;
 DMA_HandleTypeDef hdma_adc;
+
+CRC_HandleTypeDef hcrc;
 
 I2C_HandleTypeDef hi2c1;
 I2C_HandleTypeDef hi2c2;
@@ -98,6 +102,22 @@ char onTd100 = '0', onTd10 = '0', onTd1 = '0',
 	 onTh10 = '0', onTh1 = '0', onTm10 = '0', onTm1 = '0',
 	 onTs10 = '0', onTs1 = '0';// On time
 uint16_t uint_spU=0, uint_spI=0; // values sent to DACs
+uint8_t masterTxBuf[I2C_BUFF_LEN];//0-On/Off,1-4 uSP,5-8 iSP, 12-15-CRC
+uint8_t masterRxBuf[I2C_BUFF_LEN];//0-On/Off,1-4 outU,5-8 outI, 12-15-CRC
+uint8_t slaveTxBuf[I2C_BUFF_LEN];//0-On/Off,1-4 outU,5-8 outI, 12-15-CRC
+uint8_t slaveRxBuf[I2C_BUFF_LEN];//0-On/Off,1-4 uSP,5-8 iSP, 12-15-CRC
+uint32_t tempCRC;
+bool on_off_slave_state = false; // state of slave controlled device
+bool i2cError = false; // help flag to indicate I2C CRC Error
+bool redraw_ST = false; // to redraw device state in slave mode
+bool redraw_uSP = false; // to redraw U set point in slave mode
+bool redraw_iSP = false; // to redraw I set point in slave mode
+//uint8_t tmpCRC;// temporary value for CRC calculation
+//uint32_t masterTxCounter = 0;
+//uint32_t masterRxCounter = 0;
+//uint32_t slaveTxCounter = 0;
+//uint32_t slaveRxCounter = 0;
+
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -112,6 +132,7 @@ static void MX_SPI1_Init(void);
 static void MX_TIM1_Init(void);
 static void MX_TIM3_Init(void);
 static void MX_TIM6_Init(void);
+static void MX_CRC_Init(void);
 /* USER CODE BEGIN PFP */
 void menu_handler(void);
 void device_settings(void);
@@ -160,6 +181,7 @@ int main(void)
   MX_TIM1_Init();
   MX_TIM3_Init();
   MX_TIM6_Init();
+  MX_CRC_Init();
   /* USER CODE BEGIN 2 */
   /* Perform ADC calibration */
   if (HAL_ADCEx_Calibration_Start(&hadc) != HAL_OK)
@@ -267,14 +289,12 @@ int main(void)
 			  onTh1, onTm10, onTm1, onTs10, onTs1, temp_MCU);
  	  if(temp_MCU < 85.0) //no over hating
 	  {
- 		  if(!mod_sel_MS) // device is in slave mode
- 		  {
  			  uint_spI = (uint16_t)(scaleIsp   * iSP);
  			  i_DAC10_Set(uint_spI);
  			  if(on_off) // output is POWERED
  			  {
  				  uint_spU = (uint16_t)(scaleUsp * uSP);
- 				  v_DAC10_Set(uint_spU);
+ 				   v_DAC10_Set(uint_spU);
 
  			  }
  			  else // output is UNPOWERED
@@ -282,13 +302,6 @@ int main(void)
  				  v_DAC10_Set(0);
  				  //  i_DAC10_Set(0);
  			  }
- 		  }
- 		  else //constant current mode -NOT IMPLEMENTED YET!!!!
- 		  {
- 			  // just to go to CV if Wrong Selected by UI
- 			  //subject of future implementation
- 			 mod_sel_MS= false;
- 		  }
 	  }
  	  else //over heating, output UNPOWERED
  	  {
@@ -299,6 +312,67 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
+	  HAL_I2C_Slave_Receive_IT(&hi2c2, (uint8_t*) &slaveRxBuf,I2C_BUFF_LEN);
+	  if(mod_sel_MS)// device is in master mode
+	  {
+		  masterTxBuf[0]=(uint8_t)on_off;
+		  memcpy(&masterTxBuf[1], &uSP, sizeof(uSP));
+		  memcpy(&masterTxBuf[5], &iSP, sizeof(iSP));
+		  tempCRC = HAL_CRC_Calculate(&hcrc,(uint32_t *)masterTxBuf, (I2C_BUFF_LEN/4)-1);
+		  memcpy(&masterTxBuf[I2C_BUFF_LEN-4],&tempCRC,sizeof(tempCRC));
+		  HAL_I2C_Master_Transmit(&hi2c1, (I2C_SLAVE_ADDRESS << 1),
+				  	  	  	  	  	  	  	 (uint8_t*) &masterTxBuf, I2C_BUFF_LEN, 500);
+		  HAL_Delay(5);//Give some time to slave to compute received
+		  // Dummy i2c receiving for computability with PC mode interface
+		  HAL_I2C_Master_Receive(&hi2c1, (I2C_SLAVE_ADDRESS << 1),
+				  	  	  	  	  	  	  	  (uint8_t*) &masterRxBuf, I2C_BUFF_LEN, 500);
+	  }
+	  if(i2cError)
+	  {
+ 		  v_DAC10_Set(0);
+ 		  i_DAC10_Set(0);
+ 		  on_off = false;
+ 		  ST7735_DrawString(0,52,"i2c communication error",Font_11x18,WHITE, RED);
+ 		  while(1);//Lock device after CRC Error
+	  }
+	  if(redraw_ST)
+	  {
+		  if(on_off) ST7735_DrawString(124,2," ON",Font_11x18,WHITE,GREEN);
+		  else ST7735_DrawString(124,2,"OFF",Font_11x18,WHITE,RED);
+		  redraw_ST = false;
+	  }
+	  if(redraw_uSP)
+	  {
+		  ptr = float_to_char(uSP, float_for_LCD);
+		  if(uSP<1)
+		  {
+			  ST7735_DrawString(5,84," 0",Font_11x18,WHITE,BLACK);
+			  ST7735_DrawString(27,84,ptr,Font_11x18,WHITE,BLACK);
+		  }
+		  else
+		  {
+			  if(uSP<10)
+			  {
+				  ST7735_DrawString(5,84," ",Font_11x18,WHITE,BLACK);
+				  ST7735_DrawString(16,84,ptr,Font_11x18,WHITE,BLACK);
+			  }
+			  else ST7735_DrawString(5,84,ptr,Font_11x18,WHITE,BLACK);
+		  }
+		  ST7735_DrawString( 60,84,"0V",Font_11x18,WHITE,BLACK);
+		  redraw_uSP = false;
+	  }
+	  if(redraw_iSP)
+	  {
+		  ptr = float_to_char(iSP, float_for_LCD);
+		  if(iSP<1)
+		  {
+			  ST7735_DrawString(89,84,"0",Font_11x18,WHITE,BLACK);
+			  ST7735_DrawString(100,84,ptr,Font_11x18,WHITE,BLACK);
+		  }
+		  else ST7735_DrawString(89,84,ptr,Font_11x18,WHITE,BLACK);
+		  ST7735_DrawString(144,84,"A",Font_11x18,WHITE,BLACK);
+		  redraw_iSP = false;
+	  }
   }
   /* USER CODE END 3 */
 }
@@ -421,6 +495,36 @@ static void MX_ADC_Init(void)
 }
 
 /**
+  * @brief CRC Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_CRC_Init(void)
+{
+
+  /* USER CODE BEGIN CRC_Init 0 */
+
+  /* USER CODE END CRC_Init 0 */
+
+  /* USER CODE BEGIN CRC_Init 1 */
+
+  /* USER CODE END CRC_Init 1 */
+  hcrc.Instance = CRC;
+  hcrc.Init.DefaultInitValueUse = DEFAULT_INIT_VALUE_ENABLE;
+  hcrc.Init.InputDataInversionMode = CRC_INPUTDATA_INVERSION_NONE;
+  hcrc.Init.OutputDataInversionMode = CRC_OUTPUTDATA_INVERSION_DISABLE;
+  hcrc.InputDataFormat = CRC_INPUTDATA_FORMAT_WORDS;
+  if (HAL_CRC_Init(&hcrc) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN CRC_Init 2 */
+
+  /* USER CODE END CRC_Init 2 */
+
+}
+
+/**
   * @brief I2C1 Initialization Function
   * @param None
   * @retval None
@@ -436,7 +540,7 @@ static void MX_I2C1_Init(void)
 
   /* USER CODE END I2C1_Init 1 */
   hi2c1.Instance = I2C1;
-  hi2c1.Init.Timing = 0x2000090E;
+  hi2c1.Init.Timing = 0x00101D2B;
   hi2c1.Init.OwnAddress1 = 0;
   hi2c1.Init.AddressingMode = I2C_ADDRESSINGMODE_7BIT;
   hi2c1.Init.DualAddressMode = I2C_DUALADDRESS_DISABLE;
@@ -485,7 +589,7 @@ static void MX_I2C2_Init(void)
   /* USER CODE END I2C2_Init 1 */
   hi2c2.Instance = I2C2;
   hi2c2.Init.Timing = 0x20303E5D;
-  hi2c2.Init.OwnAddress1 = 64;
+  hi2c2.Init.OwnAddress1 = 90;
   hi2c2.Init.AddressingMode = I2C_ADDRESSINGMODE_7BIT;
   hi2c2.Init.DualAddressMode = I2C_DUALADDRESS_DISABLE;
   hi2c2.Init.OwnAddress2 = 0;
@@ -908,8 +1012,6 @@ void menu_handler(void)
 		}
 		case MEM:
 		{
-			//if(!on_off) //MEM selection only when device is OFF
-			//{
 				HAL_Delay(200);
 				if(enc == INC_TRN_SLOW)
 				{
@@ -925,7 +1027,6 @@ void menu_handler(void)
 				float_for_LCD[1]=0;
 				ST7735_DrawString(124,40," M",Font_11x18,BLACK,GRAY);
 				ST7735_DrawString(146 ,40,float_for_LCD,Font_11x18,BLACK,GRAY);
-			//}
 			break;
 		}
 		case BL:
@@ -971,7 +1072,6 @@ void menu_handler(void)
 				else ST7735_DrawString(5,84,ptr,Font_11x18,WHITE,BLACK);
 			}
 			ST7735_DrawString( 60,84,"0V",Font_11x18,WHITE,BLACK);
-//			ST7735_DrawString( 71,84,"V",Font_11x18,WHITE,BLACK);
 			break;
 		}
 		case I:
@@ -1273,7 +1373,44 @@ void device_settings(void)
 	enc=NO_TRN;
 	btn=NO_PRESS;
 }
-/* USER CODE END 4 */
+
+void HAL_I2C_SlaveRxCpltCallback(I2C_HandleTypeDef *hi2c)
+{
+  bool temp_b;
+  float temp_f;
+  if (hi2c == &hi2c2)
+  {
+ 	  slaveTxBuf[0]=(uint8_t)on_off;
+	  memcpy(&slaveTxBuf[1], &outU, sizeof(outU));
+	  memcpy(&slaveTxBuf[5], &outI, sizeof(outI));
+	  tempCRC = HAL_CRC_Calculate(&hcrc,(uint32_t *)slaveTxBuf, (I2C_BUFF_LEN/4)-1);
+	  memcpy(&slaveTxBuf[I2C_BUFF_LEN-4],&tempCRC,sizeof(tempCRC));
+	  HAL_I2C_Slave_Transmit_IT(&hi2c2, (uint8_t*) &slaveTxBuf, I2C_BUFF_LEN);
+	  memcpy(&tempCRC, &slaveRxBuf[I2C_BUFF_LEN-4], sizeof(tempCRC));
+	  if(tempCRC == HAL_CRC_Calculate(&hcrc,(uint32_t *)slaveRxBuf, (I2C_BUFF_LEN/4)-1))
+	  {
+		  temp_b = (slaveRxBuf[0] != 0) ? true : false;
+		  if (temp_b != on_off) // if received value differ from current update LCD
+		  {
+			  on_off = temp_b;
+			  redraw_ST = true;
+		  }
+		  memcpy(&temp_f, &slaveRxBuf[1], sizeof(temp_f));
+		  if (temp_f != uSP) // if received value differ from current update LCD
+		  {
+			  uSP = temp_f;
+			  redraw_uSP = true;
+		  }
+		  memcpy(&temp_f, &slaveRxBuf[5], sizeof(temp_f));
+		  if (temp_f != iSP)
+		  {
+			  iSP = temp_f;
+			  redraw_iSP = true;
+		  }
+	  }
+	  else i2cError = true;
+  }
+}
 
 /**
   * @brief  This function is executed in case of error occurrence.
