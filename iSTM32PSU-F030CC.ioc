@@ -1,9 +1,11 @@
 #MicroXplorer Configuration settings - do not modify
 ADC.ClockPrescaler=ADC_CLOCK_SYNC_PCLK_DIV4
-ADC.ContinuousConvMode=ENABLE
+ADC.ContinuousConvMode=DISABLE
 ADC.DMAContinuousRequests=ENABLE
+ADC.DiscontinuousConvMode=ENABLE
 ADC.EOCSelection=ADC_EOC_SEQ_CONV
-ADC.IPParameters=ClockPrescaler,ContinuousConvMode,DMAContinuousRequests,EOCSelection,Overrun,SamplingTime
+ADC.IPParameters=ClockPrescaler,ContinuousConvMode,DMAContinuousRequests,EOCSelection,Overrun,SamplingTime,LowPowerAutoWait,DiscontinuousConvMode
+ADC.LowPowerAutoWait=ENABLE
 ADC.Overrun=ADC_OVR_DATA_OVERWRITTEN
 ADC.SamplingTime=ADC_SAMPLETIME_239CYCLES_5
 CAD.formats=
@@ -107,8 +109,8 @@ Mcu.PinsNb=43
 Mcu.ThirdPartyNb=0
 Mcu.UserConstants=
 Mcu.UserName=STM32F030CCTx
-MxCube.Version=6.12.1
-MxDb.Version=DB.6.0.121
+MxCube.Version=6.13.0
+MxDb.Version=DB.6.0.130
 NVIC.ADC1_IRQn=true\:0\:0\:false\:false\:true\:true\:true\:true
 NVIC.DMA1_Channel1_IRQn=true\:0\:0\:false\:false\:true\:false\:true\:true
 NVIC.DMA1_Channel2_3_IRQn=true\:0\:0\:false\:false\:true\:false\:true\:true

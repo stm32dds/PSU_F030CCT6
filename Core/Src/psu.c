@@ -122,62 +122,54 @@ void get_adcs(volatile uint16_t adc_RAW[], float *temp_MCU,
 	  *temp_MCU = *temp_MCU * (int32_t)(110 - 30);
 	  *temp_MCU = *temp_MCU / (int32_t)(*TEMP110_CAL_ADDR - *TEMP30_CAL_ADDR);
 	  *temp_MCU = *temp_MCU + 30;
-	  // store RAW ADC data to calculate averaged values for U and I
+	  // store RAW ADC data to calculate values for U and I
 	  #define FILTER_DEPTH 45  //max.16 else OVERFLOW, if average method used
+	  	  	  	  	  	  	  //45 for good results in most common values
 	  static uint8_t  filt_cnt;
 	  static uint16_t adc_RAW_U[FILTER_DEPTH];
 	  static uint16_t adc_RAW_I[FILTER_DEPTH];
 
 	  adc_RAW_U[filt_cnt] = adc_RAW[0];
 	  adc_RAW_I[filt_cnt] = adc_RAW[1];
+	  //Circular buffer is organized
 	  filt_cnt++;
 	  if(filt_cnt > (FILTER_DEPTH-1)) filt_cnt = 0;
-	  //calculate averaged values
-	  /*
-	  uint16_t  avg_U=0, avg_I=0;
-	  for(uint8_t  avg_cnt =0; avg_cnt < FILTER_DEPTH; avg_cnt++)
-	  {
-		  avg_U = avg_U + adc_RAW_U[avg_cnt];
-		  avg_I = avg_I + adc_RAW_I[avg_cnt];
-	  }
-	  avg_U = avg_U/FILTER_DEPTH;
-	  avg_I = avg_I/FILTER_DEPTH;
-	  //calculate U&I on output (averaged)
-	  *outI = constI*avg_I;
-	  *outU = constU*avg_U;
-	  */
-
 	  // Method to find most common values
-	    uint16_t maxCountU = 0;  // Maximum number of encounters -U
-	    uint16_t maxCountI = 0;  // Maximum number of encounters -I
-	    uint16_t mostFrequentU = adc_RAW_U[0];  // Most common number - U
-	    uint16_t mostFrequentI = adc_RAW_I[0];  // Most common number - I
+	  uint16_t maxCountU = 0;  // Maximum number of encounters -U
+	  uint16_t maxCountI = 0;  // Maximum number of encounters -I
+	  uint16_t mostFrequentU = adc_RAW_U[0];  // Most common number - U
+	  uint16_t mostFrequentI = adc_RAW_I[0];  // Most common number - I
 
-	    for (uint8_t i = 0; i < FILTER_DEPTH; i++) {
-	        uint8_t currentCountU = 1;  // We reset the counter for the current number-U
-	        uint8_t currentCountI = 1;  // We reset the counter for the current number-I
+	  for (uint8_t i = 0; i < FILTER_DEPTH; i++)
+	  {
+		  uint8_t currentCountU = 1;  // We reset the counter for the current number-U
+		  uint8_t currentCountI = 1;  // We reset the counter for the current number-I
 
-	        // We loop through the remaining elements of the array and count
-	        //the occurrences of the current number
-	        for (uint8_t j = i + 1; j < FILTER_DEPTH; j++) {
-	            if (adc_RAW_U[i] == adc_RAW_U[j]) currentCountU++;
-	            if (adc_RAW_I[i] == adc_RAW_I[j]) currentCountI++;
-	        }
+		  // We loop through the remaining elements of the array and count
+		  //the occurrences of the current number
+		  for (uint8_t j = i + 1; j < FILTER_DEPTH; j++)
+		  {
+			  if (adc_RAW_U[i] == adc_RAW_U[j]) currentCountU++;
+			  if (adc_RAW_I[i] == adc_RAW_I[j]) currentCountI++;
+		  }
 
-	        //We check if the current number has more occurrences than the maximum for U
-	        if (currentCountU > maxCountU) {
-	            maxCountU = currentCountU;
-	            mostFrequentU = adc_RAW_U[i];
-	        }
-	        //We check if the current number has more occurrences than the maximum for I
-	        if (currentCountI > maxCountI) {
-	            maxCountI = currentCountI;
-	            mostFrequentI = adc_RAW_I[i];
-	        }
-	    }
+		  //We check if the current number has more occurrences than the maximum for U
+		  if (currentCountU > maxCountU)
+		  {
+			  maxCountU = currentCountU;
+			  mostFrequentU = adc_RAW_U[i];
+		  }
+		  //We check if the current number has more occurrences than the maximum for I
+		  if (currentCountI > maxCountI)
+		  {
+			  maxCountI = currentCountI;
+			  mostFrequentI = adc_RAW_I[i];
+		  }
+	  }
 		  *outI = constI*mostFrequentI;
 		  *outU = constU*mostFrequentU-(0.18*(*outI));
-		  //*outU = constU*mostFrequentU;
+	  //Non linear compensation caused from capacitor under-charge
+	  if(*outU > 25.0) *outU = *outU*1.035333218;
 }
 
 char * float_to_char(float x, char *p)
@@ -263,7 +255,7 @@ void get_time(RTC_HandleTypeDef hrtc, char* onTd100, char* onTd10, char* onTd1 ,
 
 void draw_main_dy(char* ptr, char* float_for_LCD, bool on_off, float outU, float outI,
 					char onTd100, char onTd10, char onTd1, char onTh10, char onTh1,
-					char onTm10, char onTm1, char onTs10, char onTs1, float temp_MCU)
+					char onTm10, char onTm1, char onTs10, char onTs1, float temp_MCU, RunMode rnMode)
 {
 	static float old_outU, old_outI, old_outP;
 	float outP = outU*outI;
@@ -271,6 +263,7 @@ void draw_main_dy(char* ptr, char* float_for_LCD, bool on_off, float outU, float
 				old_onTh10, old_onTh1, old_onTm10, old_onTm1, old_onTs10;
 	static bool old_on_off;
 	static char old_ptr_0, old_ptr_1;
+	static RunMode old_rnMode;
 	if(on_off)
 	{
 		// Output Voltage
@@ -291,7 +284,10 @@ void draw_main_dy(char* ptr, char* float_for_LCD, bool on_off, float outU, float
 				}
 				else ST7735_DrawString(5,3,ptr,Font_16x26,WHITE,BLACK);
 			}
-			ST7735_DrawString(101, 3,"V",Font_16x26,WHITE,BLACK);
+			if(rnMode == AUTO_U)
+				ST7735_DrawString(101,3,"V",Font_16x26,BLACK, ORANGE);
+			else
+				ST7735_DrawString(101,3,"V",Font_16x26,WHITE, BLACK);
 		}
 
 		//Output current
@@ -305,6 +301,10 @@ void draw_main_dy(char* ptr, char* float_for_LCD, bool on_off, float outU, float
 			}
 			else ST7735_DrawString(21,29,ptr,Font_16x26,WHITE,BLACK);
 			ST7735_DrawString(101,29,"A",Font_16x26,WHITE,BLACK);
+			if(rnMode == AUTO_I)
+				ST7735_DrawString(101,29,"A",Font_16x26,BLACK, ORANGE);
+			else
+				ST7735_DrawString(101,29,"A",Font_16x26,WHITE, BLACK);
 		}
 
 		//Output Power
@@ -342,14 +342,44 @@ void draw_main_dy(char* ptr, char* float_for_LCD, bool on_off, float outU, float
 			}
 			ST7735_DrawString(101,55,"W",Font_16x26,WHITE,BLACK);
 		}
+		if(old_rnMode != rnMode)
+		{
+			if(rnMode == AUTO_U)
+				ST7735_DrawString(101,3,"V",Font_16x26,BLACK, ORANGE);
+			else
+				ST7735_DrawString(101,3,"V",Font_16x26,WHITE, BLACK);
+			if(rnMode == AUTO_I)
+				ST7735_DrawString(101,29,"A",Font_16x26,BLACK, ORANGE);
+			else
+				ST7735_DrawString(101,29,"A",Font_16x26,WHITE, BLACK);
+		}
 	}
 	else //on_off=0/false
 	{
 		if(old_on_off != on_off)
 		{
-			ST7735_DrawString(5,3," 0.000V",Font_16x26,YELLOW,BLACK);
-			ST7735_DrawString(5,29," 0.000A",Font_16x26,YELLOW,BLACK);
+			ST7735_DrawString(5,3," 0.000",Font_16x26,YELLOW,BLACK);
+			ST7735_DrawString(5,29," 0.000",Font_16x26,YELLOW,BLACK);
 			ST7735_DrawString(5,55,"  0.00W",Font_16x26,YELLOW,BLACK);
+			if(rnMode == AUTO_U)
+				ST7735_DrawString(101,3,"V",Font_16x26,BLACK, ORANGE);
+			else
+				ST7735_DrawString(101,3,"V",Font_16x26,YELLOW, BLACK);
+			if(rnMode == AUTO_I)
+				ST7735_DrawString(101,29,"A",Font_16x26,BLACK, ORANGE);
+			else
+				ST7735_DrawString(101,29,"A",Font_16x26,YELLOW, BLACK);
+		}
+		if(old_rnMode != rnMode)
+		{
+			if(rnMode == AUTO_U)
+				ST7735_DrawString(101,3,"V",Font_16x26,BLACK, ORANGE);
+			else
+				ST7735_DrawString(101,3,"V",Font_16x26,YELLOW, BLACK);
+			if(rnMode == AUTO_I)
+				ST7735_DrawString(101,29,"A",Font_16x26,BLACK, ORANGE);
+			else
+				ST7735_DrawString(101,29,"A",Font_16x26,YELLOW, BLACK);
 		}
 	}
 	// Time with powered output
@@ -391,6 +421,7 @@ void draw_main_dy(char* ptr, char* float_for_LCD, bool on_off, float outU, float
 	old_onTm1 = onTm1;
 	old_onTs10 = onTs10;
 	old_on_off = on_off;
+	old_rnMode = rnMode;
 }
 
 void save_settings(float scaleU, float scaleI, float scaleUsp, float scaleIsp,

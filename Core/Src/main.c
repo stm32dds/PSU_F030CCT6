@@ -83,12 +83,13 @@ float vdd = 3.302; //On board regulated voltage
 float scaleU=9.46 , scaleI=1.43; // scaling constants for U,I~9,1/1,48
 float scaleUsp=33.40, scaleIsp=218.00; //scaling const. for set points
 float constU, constI; // pre-calculated constant to speed up U&I calculation
-float outU, outI, temp_MCU;
+float outU, outI, temp_MCU, deltaU, deltaI;
 char float_for_LCD[CHAR_BUFF_SIZE+1]; // +1 is used for "stop string" generation
 enum EncStates enc = NO_TRN;
 enum BtnStates btn = NO_PRESS;
 enum MenuSelected mnu_sel = BL;
 enum dsMenuSelected ds_mnu_sel = U_DISP;
+RunMode rnMode = FREE;
 int16_t enc_cnt = 0;
 uint8_t btn_cnt = 0;
 char* ptr; // Point to converted to char floats for LCD displaying
@@ -102,6 +103,7 @@ char onTd100 = '0', onTd10 = '0', onTd1 = '0',
 	 onTh10 = '0', onTh1 = '0', onTm10 = '0', onTm1 = '0',
 	 onTs10 = '0', onTs1 = '0';// On time
 uint16_t uint_spU=0, uint_spI=0; // values sent to DACs
+uint16_t uint_spU_reg; // regulated value to DAC in CV/CI modes
 uint8_t masterTxBuf[I2C_BUFF_LEN];//0-On/Off,1-4 uSP,5-8 iSP, 12-15-CRC
 uint8_t masterRxBuf[I2C_BUFF_LEN];//0-On/Off,1-4 outU,5-8 outI, 12-15-CRC
 uint8_t slaveTxBuf[I2C_BUFF_LEN];//0-On/Off,1-4 outU,5-8 outI, 12-15-CRC
@@ -112,12 +114,7 @@ bool i2cError = false; // help flag to indicate I2C CRC Error
 bool redraw_ST = false; // to redraw device state in slave mode
 bool redraw_uSP = false; // to redraw U set point in slave mode
 bool redraw_iSP = false; // to redraw I set point in slave mode
-//uint8_t tmpCRC;// temporary value for CRC calculation
-//uint32_t masterTxCounter = 0;
-//uint32_t masterRxCounter = 0;
-//uint32_t slaveTxCounter = 0;
-//uint32_t slaveRxCounter = 0;
-
+bool fr_ct_lp; //First control loop in CV or CI mode
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -157,7 +154,7 @@ int main(void)
   /* MCU Configuration--------------------------------------------------------*/
 
   /* Reset of all peripherals, Initializes the Flash interface and the Systick. */
-  HAL_Init();
+   HAL_Init();
 
   /* USER CODE BEGIN Init */
 
@@ -183,13 +180,9 @@ int main(void)
   MX_TIM6_Init();
   MX_CRC_Init();
   /* USER CODE BEGIN 2 */
-  /* Perform ADC calibration */
-  if (HAL_ADCEx_Calibration_Start(&hadc) != HAL_OK)
-	  	  	  	  	  	  	  	  	  	  	  	  	  Error_Handler();
-
-  /* Start ADC group regular conversion by DMA*/
-  if (HAL_ADC_Start_DMA(&hadc,(uint32_t *)adc_RAW,3) != HAL_OK)
-	  	  	  	  	  	  	  	  	  	  	  	  	  Error_Handler();
+  /*Output at start to zero*/
+  v_DAC10_Set(0);
+  i_DAC10_Set(0);
 
   /* Start TIM3 as encoder counter */
   if (HAL_TIM_Encoder_Start(&htim3, TIM_CHANNEL_ALL) != HAL_OK)
@@ -217,6 +210,10 @@ int main(void)
   HAL_Delay(2000);
   ST7735_DrawString(25,118,"...for all the Fish",Font_7x10,BRRED,BLACK);
   HAL_Delay(2000);
+
+  /* Perform ADC calibration, after power stabilization delay above */
+  if (HAL_ADCEx_Calibration_Start(&hadc) != HAL_OK)
+	  	  	  	  	  	  	  	  	  	  	  	  	  Error_Handler();
 
   draw_main_st(BLACK, WHITE); // Main static screen
   if(*( uint32_t *)(SCALE_U_ADDR) != 0xFFFFFFFF)
@@ -281,24 +278,75 @@ int main(void)
   /* USER CODE BEGIN WHILE */
   while (1)
   {
+	  /* Start ADC group regular conversion by DMA*/
+	  if (HAL_ADC_Start_DMA(&hadc,(uint32_t *)adc_RAW,3) != HAL_OK)
+		  	  	  	  	  	  	  	  	  	  	  	  	  Error_Handler();
 	  get_adcs(adc_RAW, &temp_MCU, &outU, &outI, constU, constI, vdd);
 	  if((enc != NO_TRN)||(btn != NO_PRESS)) menu_handler();
  	  get_time(hrtc, &onTd100, &onTd10, &onTd1 , &onTh10, &onTh1, &onTm10, &onTm1,
  			  &onTs10, &onTs1, on_off);
  	  draw_main_dy(ptr, float_for_LCD, on_off, outU, outI, onTd100, onTd10, onTd1, onTh10,
-			  onTh1, onTm10, onTm1, onTs10, onTs1, temp_MCU);
+			  onTh1, onTm10, onTm1, onTs10, onTs1, temp_MCU, rnMode);
  	  if(temp_MCU < 85.0) //no over hating
 	  {
  			  uint_spI = (uint16_t)(scaleIsp   * iSP);
  			  i_DAC10_Set(uint_spI);
  			  if(on_off) // output is POWERED
  			  {
- 				  uint_spU = (uint16_t)(scaleUsp * uSP);
- 				   v_DAC10_Set(uint_spU);
-
+ 				  if(rnMode == FREE) //free run
+ 				  {
+ 					  uint_spU = (uint16_t)(scaleUsp * uSP);
+ 					  v_DAC10_Set(uint_spU);
+ 					  fr_ct_lp = true; //to process first control loop on other modes
+ 				  }
+ 				  if(rnMode == AUTO_U) //voltage tune
+ 				  {
+ 					  if(fr_ct_lp)
+ 					  {
+ 						  uint_spU = (uint16_t)(scaleUsp * uSP);
+ 						  uint_spU_reg = uint_spU;
+ 						  v_DAC10_Set(uint_spU);
+ 						  fr_ct_lp = false; // this above was first control loop
+ 					  }
+ 					  else //auto tune
+ 					  {
+ 						 outI = constI*adc_RAW[1];
+ 						 outU = constU*adc_RAW[0]-(0.18*outI);
+ 						 deltaU = uSP-outU;
+ 						 if(deltaU >  0.09) ++uint_spU_reg;
+ 						 if(deltaU < -0.09) --uint_spU_reg;
+ 						 if (uint_spU_reg > 0x3FF) uint_spU_reg = 0x3FF;
+ 						 v_DAC10_Set(uint_spU_reg);
+ 						 fr_ct_lp = false;// not first control loops
+ 					  }
+ 				  }
+ 				  if(rnMode == AUTO_I) //current tune
+ 				  {
+ 					  if(fr_ct_lp)
+ 					  {
+ 						  uint_spU = (uint16_t)(scaleUsp * uSP);
+ 						  uint_spU_reg = uint_spU;
+ 						  v_DAC10_Set(uint_spU);
+ 						  fr_ct_lp = false; // this above was first control loop
+ 					  }
+ 					  else //auto tune
+ 					  {
+  						 outI = constI*adc_RAW[1];
+  						 outU = constU*adc_RAW[0]-(0.18*outI);
+  						 deltaI = iSP-outI;
+  						 if(deltaI >  0.009) ++uint_spU_reg;
+  						 if(deltaI < -0.009) --uint_spU_reg;
+  						 if(outU > uSP) uint_spU_reg = uint_spU;
+  						 if (uint_spU_reg > 0x3FF) uint_spU_reg = 0x3FF;
+  						 v_DAC10_Set(uint_spU_reg);
+  						 fr_ct_lp = false;// not first control loops
+ 					  }
+ 				  }
  			  }
  			  else // output is UNPOWERED
  			  {
+ 				  if(!fr_ct_lp) fr_ct_lp = true;
+ 				  //flag to catch first control loop in CV or CI mode
  				  v_DAC10_Set(0);
  				  //  i_DAC10_Set(0);
  			  }
@@ -308,6 +356,7 @@ int main(void)
  		  v_DAC10_Set(0);
  		  i_DAC10_Set(0);
  		  on_off = false;
+ 		  fr_ct_lp = true;
  	  }
     /* USER CODE END WHILE */
 
@@ -450,10 +499,10 @@ static void MX_ADC_Init(void)
   hadc.Init.DataAlign = ADC_DATAALIGN_RIGHT;
   hadc.Init.ScanConvMode = ADC_SCAN_DIRECTION_FORWARD;
   hadc.Init.EOCSelection = ADC_EOC_SEQ_CONV;
-  hadc.Init.LowPowerAutoWait = DISABLE;
+  hadc.Init.LowPowerAutoWait = ENABLE;
   hadc.Init.LowPowerAutoPowerOff = DISABLE;
-  hadc.Init.ContinuousConvMode = ENABLE;
-  hadc.Init.DiscontinuousConvMode = DISABLE;
+  hadc.Init.ContinuousConvMode = DISABLE;
+  hadc.Init.DiscontinuousConvMode = ENABLE;
   hadc.Init.ExternalTrigConv = ADC_SOFTWARE_START;
   hadc.Init.ExternalTrigConvEdge = ADC_EXTERNALTRIGCONVEDGE_NONE;
   hadc.Init.DMAContinuousRequests = ENABLE;
@@ -1048,10 +1097,10 @@ void menu_handler(void)
 		}
 		case U:
 		{
-			if(enc == INC_TRN_SLOW) uSP=uSP+0.01; //0.03
+			if(enc == INC_TRN_SLOW) uSP=uSP+0.005; //0.01
 			if(enc == INC_TRN_NORM) uSP=uSP+0.3;
 			if(enc == INC_TRN_FAST) uSP=uSP+3;
-			if(enc == DEC_TRN_SLOW) uSP=uSP-0.01; //0.03
+			if(enc == DEC_TRN_SLOW) uSP=uSP-0.005; //0.01
 			if(enc == DEC_TRN_NORM) uSP=uSP-0.3;
 			if(enc == DEC_TRN_FAST) uSP=uSP-3;
 			if(uSP>30) uSP=30; // no more 30V
@@ -1072,6 +1121,7 @@ void menu_handler(void)
 				else ST7735_DrawString(5,84,ptr,Font_11x18,WHITE,BLACK);
 			}
 			ST7735_DrawString( 60,84,"0V",Font_11x18,WHITE,BLACK);
+			fr_ct_lp = true;
 			break;
 		}
 		case I:
@@ -1092,6 +1142,7 @@ void menu_handler(void)
 			}
 			else ST7735_DrawString(89,84,ptr,Font_11x18,WHITE,BLACK);
 			ST7735_DrawString(144,84,"A",Font_11x18,WHITE,BLACK);
+			fr_ct_lp = true;
 			break;
 		}
 		}
@@ -1113,7 +1164,7 @@ void menu_handler(void)
 				mnu_sel = MODE;
 				break;
 			}
-			case MODE:  //Constant U or constant I
+			case MODE:  //Master or slave in i2c
 			{
 				ST7735_DrawRect
 					(123,20, 35, 20, BLACK);
@@ -1164,15 +1215,32 @@ void menu_handler(void)
 		{
 			if(mnu_sel != MEM)
 			{
-				if(on_off)
+				if(mnu_sel == ON_OFF) //implementation of AUTOs
 				{
-					ST7735_DrawString(124,2,"OFF",Font_11x18,WHITE,RED);
-					on_off = false;
+					if(on_off) // when out powered only FREE and AUTO_U
+					{
+						if(rnMode == FREE) rnMode = AUTO_U;
+						else rnMode = FREE;
+					}
+					else // when output not powered add AUTO_I as option
+					{
+						if(rnMode == FREE) rnMode = AUTO_U;
+						else if(rnMode == AUTO_U) rnMode = AUTO_I;
+						else if(rnMode == AUTO_I) rnMode = FREE;
+					}
 				}
-				else
+				else // other menus to switch output by long press
 				{
-					ST7735_DrawString(124,2," ON",Font_11x18,WHITE,GREEN);
-					on_off = true;
+					if(on_off)
+					{
+						ST7735_DrawString(124,2,"OFF",Font_11x18,WHITE,RED);
+						on_off = false;
+					}
+					else
+					{
+						ST7735_DrawString(124,2," ON",Font_11x18,WHITE,GREEN);
+						on_off = true;
+					}
 				}
 			}
 			else // process memory pre-seting selection
@@ -1412,6 +1480,8 @@ void HAL_I2C_SlaveRxCpltCallback(I2C_HandleTypeDef *hi2c)
   }
 }
 
+/* USER CODE END 4 */
+
 /**
   * @brief  This function is executed in case of error occurrence.
   * @retval None
@@ -1420,6 +1490,8 @@ void Error_Handler(void)
 {
   /* USER CODE BEGIN Error_Handler_Debug */
   /* User can add his own implementation to report the HAL error return state */
+	ST7735_FillScreen(BLACK);
+	ST7735_DrawString(20,60,"HAL Error!",Font_11x18,WHITE, RED);
   __disable_irq();
   while (1)
   {
